@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Audio Merger Tool</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        padding: 20px;
+      }
+      h1 {
+        margin-bottom: 10px;
+      }
+      #tracksContainer .track {
+        border: 1px solid #ccc;
+        padding: 10px;
+        margin-bottom: 15px;
+      }
+      canvas {
+        border: 1px solid #ddd;
+        display: block;
+        margin-bottom: 5px;
+      }
+      label {
+        display: block;
+        margin-bottom: 5px;
+      }
+      #mergeExportButton {
+        margin-top: 20px;
+        padding: 10px 20px;
+        font-size: 16px;
+      }
+      #downloadLink {
+        margin-top: 10px;
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Audio Merger Tool</h1>
+    <p>
+      Select multiple audio files from your computer. For each file you can view
+      its waveform (for a 30‑second timeline) and adjust its start “offset” before
+      merging.
+    </p>
+    <input id="audioFiles" type="file" multiple accept="audio/*" />
+    <div id="tracksContainer"></div>
+    <button id="mergeExportButton">Merge &amp; Export (30s)</button>
+    <br />
+    <audio id="previewAudio" controls style="margin-top: 15px;"></audio>
+    <a id="downloadLink" href="#" download="merged.wav"></a>
+
+    <script type="module">
+        import Crunker from 'https://cdn.jsdelivr.net/npm/crunker@2.4.0/+esm'
+        // Create a Crunker instance and keep a reference to its AudioContext.
+        const crunker = new Crunker.default();
+
+      const audioContext = crunker.context;
+
+      // Get references to DOM elements.
+      const audioInput = document.getElementById("audioFiles");
+      const tracksContainer = document.getElementById("tracksContainer");
+      const mergeExportButton = document.getElementById("mergeExportButton");
+      const previewAudio = document.getElementById("previewAudio");
+      const downloadLink = document.getElementById("downloadLink");
+
+      // Global array to hold each track’s info.
+      let tracks = [];
+
+      // When files are selected…
+      audioInput.addEventListener("change", async (e) => {
+        const files = Array.from(e.target.files);
+        tracksContainer.innerHTML = "";
+        tracks = [];
+
+        // Process each file
+        for (let file of files) {
+          // Create a temporary URL so Crunker can fetch/decode it.
+          const url = URL.createObjectURL(file);
+
+          try {
+            // Crunker’s loadAudio returns a promise that resolves to an array of AudioBuffers.
+            const buffers = await crunker.fetchAudio(url);
+            const audioBuffer = buffers[0];
+            console.log(audioBuffer)
+
+            // Create a container div for this track.
+            const trackDiv = document.createElement("div");
+            trackDiv.className = "track";
+
+            // Display the file name.
+            const title = document.createElement("p");
+            title.textContent = file.name + ` (${formatTime(audioBuffer.duration)})`;
+            trackDiv.appendChild(title);
+
+            // Create a canvas where we will draw the waveform.
+            const canvas = document.createElement("canvas");
+            // For a 30‑second preview, we use a fixed width (600px) and height.
+            canvas.width = 600;
+            canvas.height = 100;
+            trackDiv.appendChild(canvas);
+
+            // Create a slider to set the “offset” (in seconds).
+            const label = document.createElement("label");
+            label.textContent = "Offset (seconds): ";
+            const slider = document.createElement("input");
+            slider.type = "range";
+            slider.min = -audioBuffer.duration;
+            slider.max = 30;
+            slider.step = 0.1;
+            slider.value = 0;
+            label.appendChild(slider);
+            trackDiv.appendChild(label);
+
+            // A span to display the numeric offset value.
+            const offsetValue = document.createElement("span");
+            offsetValue.textContent = "00:00:0000";
+            trackDiv.appendChild(offsetValue);
+
+            // When the slider moves, update the offset display and redraw the waveform.
+            slider.addEventListener("input", () => {
+              const offset = parseFloat(slider.value);
+              offsetValue.textContent = (offset < 0 ? "-" : "") + formatTime(Math.abs(offset));
+              drawAlignedWaveform(audioBuffer, canvas, offset, 30);
+            });
+
+            // Draw the initial waveform (with offset = 0).
+            drawAlignedWaveform(audioBuffer, canvas, parseFloat(slider.value), 30);
+
+            // Save this track's info.
+            tracks.push({
+              file: file,
+              audioBuffer: audioBuffer,
+              offset: 0, // default; will be updated from the slider
+              canvas: canvas,
+              slider: slider,
+            });
+
+            tracksContainer.appendChild(trackDiv);
+          } catch (err) {
+            console.error("Error loading audio file " + file.name, err);
+          }
+        }
+      });
+
+    function formatTime(seconds) {
+        const minutes = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        const millis = Math.floor((seconds % 1) * 1000);
+        
+        return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}:${String(millis).padStart(4, '0')}`;
+    }
+
+      /**
+       * Draws a waveform for the given audioBuffer onto a canvas.
+       * The waveform is drawn onto a timeline of `totalDuration` seconds.
+       * The audio’s actual waveform is drawn starting at the given offset (in seconds).
+       */
+      function drawAlignedWaveform(audioBuffer, canvas, offset, totalDuration = 30) {
+        const ctx = canvas.getContext("2d");
+        const width = canvas.width;
+        const height = canvas.height;
+
+        // Clear the canvas.
+        ctx.clearRect(0, 0, width, height);
+
+        // Draw a light background.
+        ctx.fillStyle = "#f0f0f0";
+        ctx.fillRect(0, 0, width, height);
+
+        // Draw a center horizontal line.
+        ctx.strokeStyle = "#ccc";
+        ctx.beginPath();
+        ctx.moveTo(0, height / 2);
+        ctx.lineTo(width, height / 2);
+        ctx.stroke();
+
+        // Calculate the pixel position for the offset.
+        const offsetPx = (offset / totalDuration) * width;
+
+        // Get the first channel’s data.
+        const channelData = audioBuffer.getChannelData(0);
+        const trackDuration = audioBuffer.duration;
+        // We only display up to what will fit into the 30s timeline (i.e. from offset to 30s).
+        const displayDuration = Math.min(trackDuration, totalDuration - offset);
+        if (displayDuration <= 0) {
+          return;
+        }
+        const sampleRate = audioBuffer.sampleRate;
+        const displaySamples = Math.floor(displayDuration * sampleRate);
+        // Determine how wide the waveform should be in pixels.
+        const waveformWidth = (displayDuration / totalDuration) * width;
+        // For performance, average groups of samples per pixel.
+        const samplesPerPixel = Math.max(1, Math.floor(displaySamples / waveformWidth));
+
+        ctx.fillStyle = "#0077cc";
+        for (let i = -1; i <= 1; i += 2) {
+            ctx.beginPath();
+            let lastX = 0
+            let firstX = null
+            for (let x = 0; x < waveformWidth; x++) {
+                let startSample = x * samplesPerPixel;
+                let sum = 0;
+                for (let j = 0; j < samplesPerPixel; j++) {
+                    if (startSample + j < displaySamples) {
+                        sum += Math.abs(channelData[startSample + j]);
+                    }
+                }
+                let avg = sum / samplesPerPixel;
+                // Map the amplitude to a y coordinate.
+                let y = (1 - avg*i) * (height / 2);
+                // x position in the canvas (offset added)
+                let canvasX = offsetPx + x;
+                if (x === 0) {
+                    ctx.moveTo(canvasX, y);
+                } else {
+                    ctx.lineTo(canvasX, y);
+                }
+                lastX = canvasX
+                if (firstX === null) firstX = canvasX
+            }
+            ctx.lineTo(lastX, height / 2)
+            ctx.lineTo(firstX, height / 2)
+            ctx.fill();
+        }
+      }
+
+      /**
+       * When the user clicks the Merge & Export button, this code:
+       *   1. Reads each track’s offset (in seconds)
+       *   2. “Pads” (and trims) each audio buffer so that each becomes exactly 30s long –
+       *      with its audio starting at the specified offset.
+       *   3. Uses Crunker.mergeAudio to sum the tracks.
+       *   4. Exports the merged audio as a WAV blob and sets up a preview player and download link.
+       */
+      mergeExportButton.addEventListener("click", async () => {
+        if (tracks.length === 0) return;
+
+        // Update each track’s offset from its slider.
+        tracks.forEach((track) => {
+          track.offset = parseFloat(track.slider.value);
+        });
+
+        // Use the first track’s sample rate (assume they’re all the same).
+        const sampleRate = tracks[0].audioBuffer.sampleRate;
+        const totalSamples = sampleRate * 30; // 30 seconds
+
+        // For each track, create a padded/truncated buffer.
+        const paddedBuffers = tracks.map((track) =>
+          padAndTrimBuffer(track.audioBuffer, track.offset, totalSamples, sampleRate)
+        );
+
+        // Merge the padded buffers so that they play concurrently.
+        let mergedBuffer = await crunker.mergeAudio(paddedBuffers);
+
+        // Export the merged buffer as a WAV Blob.
+        const mergedBlob = await crunker.export(mergedBuffer, "audio/wav");
+
+        // Create an object URL for preview and download.
+        // const mergedUrl = URL.createObjectURL(mergedBlob);
+        previewAudio.src = mergedBlob.url;
+        downloadLink.href = mergedBlob.url;
+        downloadLink.textContent = "Download Merged Audio (merged.wav)";
+      });
+
+      /**
+       * Creates a new AudioBuffer of exactly totalSamples samples.
+       * The new buffer is silent until the given offset (in seconds), then
+       * copies in as many samples as will fit (or as many as are in the original).
+       */
+      function padAndTrimBuffer(buffer, offset, totalSamples, sampleRate) {
+        const offsetSamples = Math.floor(offset * sampleRate);
+        const newBuffer = audioContext.createBuffer(
+          buffer.numberOfChannels,
+          totalSamples,
+          sampleRate
+        );
+
+        for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+          const newData = newBuffer.getChannelData(channel);
+          const oldData = buffer.getChannelData(channel);
+          // (newData is already zeroed out)
+          // How many samples can we copy? (clip if the audio would go past 30s.)
+          const copySamples = Math.min(oldData.length, totalSamples - offsetSamples);
+          for (let i = 0; i < copySamples; i++) {
+            newData[offsetSamples + i] = oldData[i];
+          }
+        }
+        return newBuffer;
+      }
+    </script>
+  </body>
+</html>
