@@ -116,25 +116,50 @@
             // A span to display the numeric offset value.
             const offsetValue = document.createElement("span");
             offsetValue.textContent = "00:00:0000";
-            trackDiv.appendChild(offsetValue);
+            label.appendChild(offsetValue);
+
+            // Create volume controls
+            const volumeLabel = document.createElement("label");
+            volumeLabel.textContent = "Volume: ";
+            const volumeSlider = document.createElement("input");
+            volumeSlider.type = "range";
+            volumeSlider.min = 0;
+            volumeSlider.max = 1.5;
+            volumeSlider.step = 0.01;
+            volumeSlider.value = 1;
+            volumeLabel.appendChild(volumeSlider);
+            const volumeValue = document.createElement("span");
+            volumeValue.textContent = "100%";
+            volumeLabel.appendChild(volumeValue);
+            trackDiv.appendChild(volumeLabel);
 
             // When the slider moves, update the offset display and redraw the waveform.
             slider.addEventListener("input", () => {
               const offset = parseFloat(slider.value);
+              const volume = parseFloat(volumeSlider.value);
               offsetValue.textContent = (offset < 0 ? "-" : "") + formatTime(Math.abs(offset));
-              drawAlignedWaveform(audioBuffer, canvas, offset, 30);
+              drawAlignedWaveform(audioBuffer, canvas, offset, 30, volume);
+            });
+
+            volumeSlider.addEventListener("input", () => {
+              const offset = parseFloat(slider.value);
+              const volume = parseFloat(volumeSlider.value);
+              volumeValue.textContent = `${Math.round(volume * 100)}%`;
+              drawAlignedWaveform(audioBuffer, canvas, offset, 30, volume);
             });
 
             // Draw the initial waveform (with offset = 0).
-            drawAlignedWaveform(audioBuffer, canvas, parseFloat(slider.value), 30);
+            drawAlignedWaveform(audioBuffer, canvas, parseFloat(slider.value), 30, 1);
 
             // Save this track's info.
             tracks.push({
               file: file,
               audioBuffer: audioBuffer,
               offset: 0, // default; will be updated from the slider
+              volume: 1,
               canvas: canvas,
               slider: slider,
+              volumeSlider,
             });
 
             tracksContainer.appendChild(trackDiv);
@@ -157,7 +182,7 @@
        * The waveform is drawn onto a timeline of `totalDuration` seconds.
        * The audio’s actual waveform is drawn starting at the given offset (in seconds).
        */
-      function drawAlignedWaveform(audioBuffer, canvas, offset, totalDuration = 30) {
+      function drawAlignedWaveform(audioBuffer, canvas, offset, totalDuration = 30, volume = 1) {
         const ctx = canvas.getContext("2d");
         const width = canvas.width;
         const height = canvas.height;
@@ -207,7 +232,7 @@
                         sum += Math.abs(channelData[startSample + j]);
                     }
                 }
-                let avg = sum / samplesPerPixel;
+                let avg = sum / samplesPerPixel * volume;
                 // Map the amplitude to a y coordinate.
                 let y = (1 - avg*i) * (height / 2);
                 // x position in the canvas (offset added)
@@ -240,6 +265,7 @@
         // Update each track’s offset from its slider.
         tracks.forEach((track) => {
           track.offset = parseFloat(track.slider.value);
+          track.volume = parseFloat(track.volumeSlider.value);
         });
 
         // Use the first track’s sample rate (assume they’re all the same).
@@ -247,12 +273,17 @@
         const totalSamples = sampleRate * 30; // 30 seconds
 
         // For each track, create a padded/truncated buffer.
-        const paddedBuffers = tracks.map((track) =>
-          padAndTrimBuffer(track.audioBuffer, track.offset, totalSamples, sampleRate)
-        );
+        const paddedTracks = tracks.map((track) => {
+          const newBuffer = padAndTrimBuffer(track.audioBuffer, track.offset, totalSamples, sampleRate)
+          return { ...track, audioBuffer: newBuffer }
+        });
+
+        const volumedBuffers = paddedTracks.map((track) => 
+          changeVolumeBuffer(track.audioBuffer, track.volume)
+        )
 
         // Merge the padded buffers so that they play concurrently.
-        let mergedBuffer = await crunker.mergeAudio(paddedBuffers);
+        let mergedBuffer = await crunker.mergeAudio(volumedBuffers);
 
         // Export the merged buffer as a WAV Blob.
         const mergedBlob = await crunker.export(mergedBuffer, "audio/wav");
@@ -287,6 +318,38 @@
             newData[offsetSamples + i] = oldData[i];
           }
         }
+        return newBuffer;
+      }
+
+      /**
+       * Creates a new AudioBuffer with volume scaled by the given factor.
+       * The new buffer is the same length as the original, but each sample's amplitude
+       * is multiplied by the volumeFactor (1 leaves the volume unchanged,
+       * less than 1 reduces volume, and greater than 1 increases volume).
+       *
+       * @param {AudioBuffer} buffer - The original audio buffer.
+       * @param {number} volumeFactor - The factor to multiply each sample by.
+       * @returns {AudioBuffer} A new AudioBuffer with adjusted volume.
+       */
+      function changeVolumeBuffer(buffer, volumeFactor) {
+        // Create a new AudioBuffer with the same number of channels, length, and sample rate as the original.
+        const newBuffer = audioContext.createBuffer(
+          buffer.numberOfChannels,
+          buffer.length,
+          buffer.sampleRate
+        );
+
+        // Process each channel.
+        for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+          const oldData = buffer.getChannelData(channel);
+          const newData = newBuffer.getChannelData(channel);
+          
+          // Multiply each sample by the volume factor.
+          for (let i = 0; i < oldData.length; i++) {
+            newData[i] = oldData[i] * volumeFactor;
+          }
+        }
+        
         return newBuffer;
       }
     </script>
